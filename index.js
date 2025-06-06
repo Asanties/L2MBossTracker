@@ -34,7 +34,7 @@ client.bossData = new Collection();
 
 
 const prefix = '!';
-const DATA_FILE_PATH = path.join(__dirname, 'boss_data.json'); // Path to the data file
+const DATA_FILE_PATH = path.join(process.env.RENDER_DISK_MOUNT_PATH || __dirname, 'boss_data.json');
 
 // Timers for notifications
 // { guildId_bossKey_type: timeoutObject }
