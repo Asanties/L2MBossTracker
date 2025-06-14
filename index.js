@@ -1,5 +1,5 @@
 // Import necessary classes from discord.js
-const { Client, GatewayIntentBits, Collection, Partials, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField } = require('discord.js');
+const { Client, GatewayIntentBits, Collection, Partials, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField, StringSelectMenuBuilder } = require('discord.js');
 const fs = require('fs'); // File System module for saving/loading data
 const path = require('path'); // Path module for constructing file paths
 
@@ -309,20 +309,28 @@ client.on('messageCreate', async message => {
         }
 
     } else if (commandName === 'removeboss') {
-        if (args.length < 1) {
-            return message.reply(`Usage: ${prefix}removeboss "<boss_name>"`);
+        if (guildBosses.size === 0) {
+            return message.reply('There are no bosses to remove.');
         }
-        const bossNameArg = args[0];
-        const bossKey = bossNameArg.toLowerCase().replace(/\s+/g, '_');
 
-        if (guildBosses.has(bossKey)) {
-            clearBossTimers(guildId, bossKey);
-            guildBosses.delete(bossKey);
-            await message.reply(`Boss "${bossNameArg}" removed.`);
-            saveBossData();
-        } else {
-            await message.reply(`Boss "${bossNameArg}" not found.`);
-        }
+        const options = guildBosses.map(boss => ({
+            label: boss.name,
+            description: `Location: ${boss.location}`,
+            value: boss.name.toLowerCase().replace(/\s+/g, '_') // Use the bossKey as value
+        }));
+
+        const selectMenu = new StringSelectMenuBuilder()
+            .setCustomId('remove_boss_select')
+            .setPlaceholder('Select a boss to remove')
+            .addOptions(options);
+
+        const row = new ActionRowBuilder().addComponents(selectMenu);
+
+        await message.reply({
+            content: 'Please select the boss you want to remove from the list below:',
+            components: [row],
+            ephemeral: true // Make it visible only to the user who ran the command
+        });
     } else if (commandName === 'setchannel') {
         if (args.length < 2) {
             return message.reply(`Usage: ${prefix}setchannel "<boss_name>" <channel_id>`);
@@ -424,6 +432,25 @@ function updateBossAsKilled(guildId, bossKey, killTimestamp, replyChannel, inter
 
 
 client.on('interactionCreate', async interaction => {
+    // Handle Dropdown Menu for Removing a Boss
+    if (interaction.isStringSelectMenu() && interaction.customId === 'remove_boss_select') {
+        const bossKeyToRemove = interaction.values[0];
+        const guildBosses = client.bossData.get(interaction.guildId);
+        const bossToRemove = guildBosses.get(bossKeyToRemove);
+        
+        if (bossToRemove) {
+            clearBossTimers(interaction.guildId, bossKeyToRemove);
+            guildBosses.delete(bossKeyToRemove);
+            saveBossData();
+            
+            await interaction.update({ content: `✅ Boss **${bossToRemove.name}** has been successfully removed.`, components: [] });
+        } else {
+            await interaction.update({ content: 'Error: Could not find the selected boss. It might have been removed already.', components: [] });
+        }
+        return;
+    }
+
+
     if (!interaction.isButton()) return;
 
     if (interaction.customId.startsWith('help_')) {
@@ -445,8 +472,8 @@ client.on('interactionCreate', async interaction => {
                 helpText += 'Shows the status of all tracked bosses or a specific boss.';
                 break;
             case 'removeboss':
-                helpText += `**${prefix}removeboss "<name>"**\n`;
-                helpText += 'Removes a boss from the tracking list.';
+                helpText += `**${prefix}removeboss**\n`;
+                helpText += 'Opens an interactive menu to select a boss to remove.';
                 break;
             case 'setchannel':
                 helpText += `**${prefix}setchannel "<name>" <channel_id>**\n`;
@@ -478,9 +505,7 @@ client.on('interactionCreate', async interaction => {
         if (guildBosses && guildBosses.size > 0) {
             guildBosses.forEach((boss, bossKey) => {
                 console.log(`Server restart: Triggering spawn for ${boss.name}`);
-                // Clear any existing timers before forcing a new spawn notification
                 clearBossTimers(interaction.guildId, bossKey);
-                // Trigger the spawn notification immediately
                 triggerSpawnNotification(interaction.guildId, bossKey);
             });
         } else {
