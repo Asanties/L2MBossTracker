@@ -38,6 +38,7 @@ client.activeTimers = new Map();
 
 const AUTO_MISS_TIMEOUT_MINUTES = 20;
 const PRE_SPAWN_NOTIFICATION_MINUTES = 10; 
+const UNCONFIRMED_SPAWN_DELAY_MINUTES = 10; // New: 10 minute buffer for unconfirmed spawns
 
 
 client.on('ready', () => {
@@ -475,6 +476,58 @@ function updateBossAsKilled(guildId, bossKey, killTimestamp, replyChannel, inter
     saveBossData();
 }
 
+// New function to handle unconfirmed spawns (from Miss, Not Appeared, or Auto-Miss)
+async function handleUnconfirmedSpawn(interaction, bossKey, reason) {
+    const guildId = interaction.guildId;
+    const guildBosses = client.bossData.get(guildId);
+    const boss = guildBosses.get(bossKey);
+    if (!boss) return;
+
+    // The base for calculation is the time the boss *should* have spawned.
+    const expectedSpawnTime = boss.nextSpawnEstimateMin;
+    if (!expectedSpawnTime) {
+        if (interaction.isButton()) {
+            await interaction.reply({ content: `Cannot process this action for **${boss.name}** as there was no expected spawn time. Please use \`!killed\` to set a new timer.`, ephemeral: true});
+        }
+        return;
+    }
+
+    const MINUTE_IN_MS = 60 * 1000;
+    const HOUR_IN_MS = 60 * MINUTE_IN_MS;
+    
+    // New logic: next spawn = expected spawn + respawn time + 10 minute buffer
+    const nextMin = expectedSpawnTime + (boss.minRespawnHours * HOUR_IN_MS) + (UNCONFIRMED_SPAWN_DELAY_MINUTES * MINUTE_IN_MS);
+    let nextMax = null;
+    if (boss.maxRespawnHours && boss.maxRespawnHours > boss.minRespawnHours) {
+        nextMax = expectedSpawnTime + (boss.maxRespawnHours * HOUR_IN_MS) + (UNCONFIRMED_SPAWN_DELAY_MINUTES * MINUTE_IN_MS);
+    }
+
+    boss.isWindow = true; // The next spawn is now considered a window
+    boss.lastKilled = null; // We don't have a confirmed kill time
+    boss.nextSpawnEstimateMin = nextMin;
+    boss.nextSpawnEstimateMax = nextMax;
+
+    const responseEmbed = new EmbedBuilder()
+        .setColor(0x778899) // LightSlateGray
+        .setTitle(`⌛ ${boss.name} - Timer Advanced (${reason})`)
+        .setDescription(`The timer for **${boss.name}** has been advanced assuming an unconfirmed spawn. The next spawn is now a window around the original respawn time, plus a 10-minute buffer.`)
+        .addFields({ name: 'New Estimated Window', value: formatNextSpawn(boss) })
+        .setFooter({ text: 'This is not an exact time!' })
+        .setTimestamp();
+    
+    if (interaction.isButton()) {
+        await interaction.reply({ embeds: [responseEmbed] });
+    } else { // This is for auto-miss, which doesn't have a direct reply
+        const notifyChannel = await client.channels.fetch(interaction.channelId).catch(() => null);
+        if (notifyChannel) {
+            await notifyChannel.send({ embeds: [responseEmbed] });
+        }
+    }
+
+    clearBossTimers(guildId, bossKey);
+    scheduleBossNotifications(guildId, bossKey);
+    saveBossData();
+}
 
 client.on('interactionCreate', async interaction => {
     // Handle Dropdown Menu for Removing a Boss
@@ -599,47 +652,13 @@ client.on('interactionCreate', async interaction => {
        await interaction.message.edit({ components: [] }).catch(console.error);
     }
 
-    const now = new Date().getTime();
-
     if (action === 'dead') {
-        updateBossAsKilled(interaction.guildId, bossKeyFromId, now, interaction.channel, interaction);
-    } else if (action === 'miss') {
-        boss.isWindow = true;
-        boss.lastKilled = null; 
-        boss.nextSpawnEstimateMin = now + boss.minRespawnHours * 60 * 60 * 1000;
-        if (boss.maxRespawnHours && boss.maxRespawnHours > boss.minRespawnHours) {
-            boss.nextSpawnEstimateMax = now + boss.maxRespawnHours * 60 * 60 * 1000;
-        } else { 
-            boss.nextSpawnEstimateMax = now + (boss.minRespawnHours + 1) * 60 * 60 * 1000;
-        }
-
-        await interaction.reply({ content: `🤷 Boss **${boss.name}** (${boss.location}) was **missed**. Next *possible* appearance time (window): ${formatNextSpawn(boss)}. **This is not an exact time!**`, ephemeral: false });
-        clearBossTimers(interaction.guildId, bossKeyFromId); 
-        scheduleBossNotifications(interaction.guildId, bossKeyFromId);
-        saveBossData();
-
-    } else if (action === 'notappeared') {
-        boss.isWindow = true;
-        let baseTime = boss.nextSpawnEstimateMin || now;
-
-        boss.lastKilled = null;
-        boss.nextSpawnEstimateMin = baseTime + 1 * 60 * 60 * 1000; 
-        if (boss.nextSpawnEstimateMax) {
-             boss.nextSpawnEstimateMax = boss.nextSpawnEstimateMax + 1 * 60 * 60 * 1000;
-        } else if (boss.maxRespawnHours){ 
-            boss.nextSpawnEstimateMax = boss.nextSpawnEstimateMin + (boss.maxRespawnHours - boss.minRespawnHours) * 60 * 60 * 1000;
-             if (boss.nextSpawnEstimateMax <= boss.nextSpawnEstimateMin) { 
-                boss.nextSpawnEstimateMax = boss.nextSpawnEstimateMin + 1 * 60 * 60 * 1000; 
-            }
-        } else { 
-            boss.nextSpawnEstimateMax = boss.nextSpawnEstimateMin + 1 * 60 * 60 * 1000; 
-        }
-
-        await interaction.reply({ content: `🚫 Boss **${boss.name}** (${boss.location}) **did not appear**. Expectation shifted. Next *possible* time (window): ${formatNextSpawn(boss)}. **This is not an exact time!**`, ephemeral: false });
-        clearBossTimers(interaction.guildId, bossKeyFromId); 
-        scheduleBossNotifications(interaction.guildId, bossKeyFromId);
-        saveBossData();
+        updateBossAsKilled(interaction.guildId, bossKeyFromId, new Date().getTime(), interaction.channel, interaction);
+    } else if (action === 'miss' || action === 'notappeared') {
+        // Both Missed and Did Not Appear now use the same logic
+        await handleUnconfirmedSpawn(interaction, bossKeyFromId, action === 'miss' ? 'missed' : 'not appeared');
     }
+    
     boss.messageIdToTrack = null; 
 });
 
@@ -757,7 +776,7 @@ function scheduleBossNotifications(guildId, bossKey) {
                         preSpawnEmbed.setFooter({ text: 'This is the start of the respawn window.' });
                     }
                     
-                    await notifyChannel.send({ embeds: [preSpawnEmbed] });
+                    await notifyChannel.send({ content: '@everyone', embeds: [preSpawnEmbed] });
 
                 } else {
                     console.warn(`Pre-spawn: Could not find channel for boss ${currentBossData.name} (${currentBossData.notificationChannelId || currentBossData.originalChannelId})`);
@@ -830,41 +849,13 @@ function scheduleAutoMissTimer(guildId, bossKey, originalMessageId, channelIdFor
                 console.error(`Error removing buttons for auto-missed boss ${bossKey}:`, editError);
             }
 
-            const now = new Date().getTime();
-            currentBossData.isWindow = true;
-            currentBossData.lastKilled = null;
-            currentBossData.nextSpawnEstimateMin = now + currentBossData.minRespawnHours * 60 * 60 * 1000;
-            if (currentBossData.maxRespawnHours && currentBossData.maxRespawnHours > currentBossData.minRespawnHours) {
-                currentBossData.nextSpawnEstimateMax = now + currentBossData.maxRespawnHours * 60 * 60 * 1000;
-            } else {
-                currentBossData.nextSpawnEstimateMax = now + (currentBossData.minRespawnHours + 1) * 60 * 60 * 1000;
-            }
-            currentBossData.messageIdToTrack = null; 
-            currentBossData.autoMissJob = null; 
-
-            try {
-                const channelForMessage = await client.channels.fetch(channelIdForAutoMissMessage).catch(() => null);
-                 if (channelForMessage) {
-                    const autoMissEmbed = new EmbedBuilder()
-                        .setColor(0x778899) // LightSlateGray
-                        .setTitle(`⌛ ${currentBossData.name} - Automatically Missed`)
-                        .setDescription(`No status was reported for **${currentBossData.name}** (${currentBossData.location}). It has been marked as **missed** automatically.`)
-                        .addFields(
-                            { name: 'Next Possible Time', value: formatNextSpawn(currentBossData) }
-                        )
-                        .setFooter({ text: 'This is not an exact time!' })
-                        .setTimestamp();
-        
-                    await channelForMessage.send({ embeds: [autoMissEmbed] });
-                } else {
-                    console.warn(`AutoMiss: Could not find channel ${channelIdForAutoMissMessage} to send auto-miss message for boss ${currentBossData.name}.`);
-                }
-            } catch (sendError) {
-                console.error(`Error sending auto-miss notification for ${bossKey}:`, sendError);
-            }
-            
-            scheduleBossNotifications(guildId, bossKey); 
-            saveBossData();
+            // This is a pseudo-interaction to pass to the handler
+            const pseudoInteraction = {
+                guildId: guildId,
+                channelId: channelIdForAutoMissMessage,
+                isButton: () => false // To prevent it from being treated as a button click
+            };
+            await handleUnconfirmedSpawn(pseudoInteraction, bossKey, 'auto-timeout');
 
         } catch (e) {
             console.error(`Error in auto-miss timer for boss ${bossKey}:`, e);
