@@ -159,7 +159,7 @@ client.on('messageCreate', async message => {
         const row2 = new ActionRowBuilder()
             .addComponents(
                 new ButtonBuilder().setCustomId('help_removeboss').setLabel('Remove Boss').setStyle(ButtonStyle.Danger),
-                new ButtonBuilder().setCustomId('help_setchannel').setLabel('Notify Channel').setStyle(ButtonStyle.Primary),
+                new ButtonBuilder().setCustomId('help_next').setLabel('Next Bosses').setStyle(ButtonStyle.Secondary),
                 new ButtonBuilder().setCustomId('help_restart').setLabel('Server Restart').setStyle(ButtonStyle.Danger)
             );
 
@@ -312,25 +312,70 @@ client.on('messageCreate', async message => {
         if (guildBosses.size === 0) {
             return message.reply('There are no bosses to remove.');
         }
-
-        const options = guildBosses.map(boss => ({
-            label: boss.name,
-            description: `Location: ${boss.location}`,
-            value: boss.name.toLowerCase().replace(/\s+/g, '_') // Use the bossKey as value
+    
+        const allOptions = guildBosses.map(boss => ({
+            label: boss.name.substring(0, 100),
+            description: `Location: ${boss.location}`.substring(0, 100),
+            value: boss.name.toLowerCase().replace(/\s+/g, '_').substring(0, 100)
         }));
+    
+        const CHUNK_SIZE = 25;
+        const chunkedOptions = [];
+        for (let i = 0; i < allOptions.length; i += CHUNK_SIZE) {
+            chunkedOptions.push(allOptions.slice(i, i + CHUNK_SIZE));
+        }
+    
+        await message.reply({ content: 'Please select the boss you want to remove from the list below:', ephemeral: true });
 
-        const selectMenu = new StringSelectMenuBuilder()
-            .setCustomId('remove_boss_select')
-            .setPlaceholder('Select a boss to remove')
-            .addOptions(options);
+        for (let i = 0; i < chunkedOptions.length; i++) {
+            const chunk = chunkedOptions[i];
+            const selectMenu = new StringSelectMenuBuilder()
+                .setCustomId(`remove_boss_select_${i}`)
+                .setPlaceholder(`Select a boss to remove (Page ${i + 1}/${chunkedOptions.length})`)
+                .addOptions(chunk);
+    
+            const row = new ActionRowBuilder().addComponents(selectMenu);
+    
+            await message.channel.send({
+                content: `Page ${i + 1} of ${chunkedOptions.length}:`,
+                components: [row]
+            });
+        }
+    } else if (commandName === 'next') {
+        if (guildBosses.size === 0) {
+            return message.reply('No bosses are being tracked to show the next spawns.');
+        }
 
-        const row = new ActionRowBuilder().addComponents(selectMenu);
+        const now = Date.now();
+        const upcomingBosses = [...guildBosses.values()]
+            .filter(boss => boss.nextSpawnEstimateMin && boss.nextSpawnEstimateMin > now)
+            .sort((a, b) => a.nextSpawnEstimateMin - b.nextSpawnEstimateMin);
 
-        await message.reply({
-            content: 'Please select the boss you want to remove from the list below:',
-            components: [row],
-            ephemeral: true // Make it visible only to the user who ran the command
-        });
+        if (upcomingBosses.length === 0) {
+            return message.reply('There are no upcoming boss spawns scheduled.');
+        }
+        
+        const nextFive = upcomingBosses.slice(0, 5);
+
+        await message.reply(`Here are the next ${nextFive.length} upcoming boss spawns:`);
+
+        for (const boss of nextFive) {
+            const spawnEmbed = new EmbedBuilder()
+                .setColor(boss.isWindow ? 0x4169E1 : 0x32CD32) // RoyalBlue for Window, LimeGreen for exact
+                .setTitle(`⚔️ ${boss.name}`)
+                .addFields(
+                    { name: 'Location', value: boss.location, inline: true },
+                    { name: 'Spawn Time', value: formatNextSpawn(boss), inline: false }
+                )
+                .setTimestamp(boss.nextSpawnEstimateMin);
+            
+            if (boss.isWindow) {
+                spawnEmbed.setFooter({text: 'This is the start of the respawn window.'});
+            }
+
+            await message.channel.send({ embeds: [spawnEmbed] });
+        }
+
     } else if (commandName === 'setchannel') {
         if (args.length < 2) {
             return message.reply(`Usage: ${prefix}setchannel "<boss_name>" <channel_id>`);
@@ -433,7 +478,7 @@ function updateBossAsKilled(guildId, bossKey, killTimestamp, replyChannel, inter
 
 client.on('interactionCreate', async interaction => {
     // Handle Dropdown Menu for Removing a Boss
-    if (interaction.isStringSelectMenu() && interaction.customId === 'remove_boss_select') {
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith('remove_boss_select')) {
         const bossKeyToRemove = interaction.values[0];
         const guildBosses = client.bossData.get(interaction.guildId);
         const bossToRemove = guildBosses.get(bossKeyToRemove);
@@ -482,6 +527,10 @@ client.on('interactionCreate', async interaction => {
             case 'restart':
                 helpText += `**${prefix}restart**\n`;
                 helpText += 'Initiates a server restart sequence, triggering spawn notifications for all bosses. **(Admin only)**';
+                break;
+            case 'next':
+                helpText += `**${prefix}next**\n`;
+                helpText += 'Displays the next 5 upcoming boss spawns.';
                 break;
             case 'ping':
                 helpText += `**${prefix}ping**\n`;
