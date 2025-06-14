@@ -27,20 +27,17 @@ const client = new Client({
 });
 
 client.commands = new Collection();
-// Structure of client.bossData:
-// Collection<guildId, Collection<bossKey, bossObject>>
-// bossObject: { name, location, minRespawnHours, maxRespawnHours, lastKilled, nextSpawnEstimateMin, nextSpawnEstimateMax, isWindow, notificationJob(runtime), spawnNotificationJob(runtime), autoMissJob(runtime), messageIdToTrack, notificationChannelId, originalChannelId }
 client.bossData = new Collection();
 
-
 const prefix = '!';
-const DATA_FILE_PATH = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || __dirname, 'boss_data.json');
+// This path is now simple and perfect for a VPS environment
+const DATA_FILE_PATH = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || __dirname, 'boss_data.json'); 
 
 // Timers for notifications
-// { guildId_bossKey_type: timeoutObject }
 client.activeTimers = new Map();
 
 const AUTO_MISS_TIMEOUT_MINUTES = 20;
+const PRE_SPAWN_NOTIFICATION_MINUTES = 10; 
 
 
 client.on('ready', () => {
@@ -50,7 +47,7 @@ client.on('ready', () => {
     client.user.setActivity(`Lineage 2M | ${prefix}help`, { type: 3 /* WATCHING */ });
 
     loadBossData();
-    initializeBossTimers(); // Must be after loading data
+    initializeBossTimers();
 });
 
 function saveBossData() {
@@ -58,9 +55,7 @@ function saveBossData() {
     client.bossData.forEach((guildBosses, guildId) => {
         dataToSave[guildId] = {};
         guildBosses.forEach((bossObject, bossKey) => {
-            // Create a copy to avoid modifying the live object directly for saving
             const bossToSave = { ...bossObject };
-            // Remove runtime timer IDs before saving, they will be recreated
             delete bossToSave.notificationJob;
             delete bossToSave.spawnNotificationJob;
             delete bossToSave.autoMissJob;
@@ -78,11 +73,10 @@ function saveBossData() {
 
 function loadBossData() {
     try {
-        // Проверяем, существует ли основной файл данных в постоянном хранилище
         if (fs.existsSync(DATA_FILE_PATH)) {
             const rawData = fs.readFileSync(DATA_FILE_PATH);
             const loadedData = JSON.parse(rawData);
-
+            
             client.bossData.clear(); 
 
             for (const guildId in loadedData) {
@@ -96,20 +90,17 @@ function loadBossData() {
                 }
                 client.bossData.set(guildId, guildBossesCollection);
             }
-            console.log('Boss data loaded successfully from persistent storage.');
+            console.log('Boss data loaded successfully.');
         } else {
-            // Если основной файл не найден, ищем файл для импорта
-            console.log('Persistent boss_data.json not found. Checking for import file...');
-            const importFilePath = path.join(__dirname, 'boss_data_import.json');
-            if (fs.existsSync(importFilePath)) {
-                // Копируем данные из файла для импорта в постоянное хранилище
-                fs.copyFileSync(importFilePath, DATA_FILE_PATH);
-                console.log('Successfully copied data from boss_data_import.json to persistent storage.');
-                // После копирования, загружаем данные как обычно
-                loadBossData(); // Рекурсивный вызов, чтобы теперь прочитать уже скопированный файл
-            } else {
-                console.log('No import file found. Starting fresh.');
-            }
+             console.log('Persistent boss_data.json not found. Checking for import file...');
+             const importFilePath = path.join(__dirname, 'boss_data_import.json');
+             if (fs.existsSync(importFilePath)) {
+                 fs.copyFileSync(importFilePath, DATA_FILE_PATH);
+                 console.log('Successfully copied data from boss_data_import.json to persistent storage.');
+                 loadBossData(); // Recursive call to now load the copied file
+             } else {
+                 console.log('No import file found. Starting fresh.');
+             }
         }
     } catch (error) {
         console.error('Failed to load boss data:', error);
@@ -122,15 +113,12 @@ function initializeBossTimers() {
     const now = Date.now();
     client.bossData.forEach((guildBosses, guildId) => {
         guildBosses.forEach((boss, bossKey) => {
-            // Only schedule if there's a future spawn time
             if (boss.nextSpawnEstimateMin && boss.nextSpawnEstimateMin > now) {
                 console.log(`Re-scheduling notifications for ${boss.name} (${bossKey}) in guild ${guildId}`);
                 scheduleBossNotifications(guildId, bossKey);
             }
-            // Check if an auto-miss timer needs to be re-established for a message with buttons
             if (boss.messageIdToTrack && boss.spawnNotificationJob === null && boss.autoMissJob === null) {
                  console.log(`Found active message with buttons for ${boss.name} (${bossKey}). Re-scheduling auto-miss timer.`);
-                 // Ensure the notificationChannelId or originalChannelId is valid before scheduling
                  const channelForAutoMiss = boss.notificationChannelId || boss.originalChannelId;
                  if (channelForAutoMiss) {
                     scheduleAutoMissTimer(guildId, bossKey, boss.messageIdToTrack, channelForAutoMiss);
@@ -171,11 +159,37 @@ client.on('messageCreate', async message => {
         const row2 = new ActionRowBuilder()
             .addComponents(
                 new ButtonBuilder().setCustomId('help_removeboss').setLabel('Remove Boss').setStyle(ButtonStyle.Danger),
-                new ButtonBuilder().setCustomId('help_setchannel').setLabel('Notification Channel').setStyle(ButtonStyle.Primary),
-                new ButtonBuilder().setCustomId('help_ping').setLabel('Ping').setStyle(ButtonStyle.Secondary)
+                new ButtonBuilder().setCustomId('help_setchannel').setLabel('Notify Channel').setStyle(ButtonStyle.Primary),
+                new ButtonBuilder().setCustomId('help_restart').setLabel('Server Restart').setStyle(ButtonStyle.Danger)
             );
 
         await message.channel.send({ embeds: [helpEmbed], components: [row1, row2] });
+        return;
+    }
+
+    if (commandName === 'restart') {
+        if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+            return message.reply('You must be an administrator to use this command.');
+        }
+
+        const restartEmbed = new EmbedBuilder()
+            .setColor(0xFF4500)
+            .setTitle('🚨 Server Restart Confirmation')
+            .setDescription('This action will trigger spawn notifications for **all** tracked bosses.\nUse this after a server maintenance or restart.\n\n**Are you sure you want to proceed?**');
+        
+        const row = new ActionRowBuilder()
+            .addComponents(
+                new ButtonBuilder()
+                    .setCustomId('server_restart_confirm')
+                    .setLabel('Confirm (Server ON)')
+                    .setStyle(ButtonStyle.Danger),
+                new ButtonBuilder()
+                    .setCustomId('server_restart_cancel')
+                    .setLabel('Cancel')
+                    .setStyle(ButtonStyle.Secondary)
+            );
+        
+        await message.reply({ embeds: [restartEmbed], components: [row] });
         return;
     }
 
@@ -235,12 +249,11 @@ client.on('messageCreate', async message => {
             notificationChannelId: notificationChannelId,
             originalChannelId: message.channel.id
         });
-        client.bossData.set(guildId, guildBosses);
         await message.reply(`Boss **${bossName}** (Location: ${location}, Respawn: ${minRespawnHours}${maxRespawnHours ? `-${maxRespawnHours}` : ''} hrs) added. Notifications in channel <#${notificationChannelId}>.`);
         saveBossData();
     } else if (commandName === 'killed') {
         if (args.length < 1) {
-            return message.reply(`Usage: ${prefix}killed "<boss_name>" [time: YYYY-MM-DD HH:MM / MM/DD/YYYY HH:MM / timestamp_seconds]`);
+            return message.reply(`Usage: ${prefix}killed "<boss_name>" ["YYYY-MM-DD HH:MM"]`);
         }
         const bossNameArg = args[0];
         const bossKey = bossNameArg.toLowerCase().replace(/\s+/g, '_');
@@ -253,32 +266,18 @@ client.on('messageCreate', async message => {
         let killTimestamp = new Date().getTime(); 
 
         if (args.length > 1) {
-            const timeInputString = args.slice(1).join(" "); 
+            const timeInputString = args[1];
             let parsedDate;
-
-            if (/^\d+$/.test(timeInputString)) {
-                const numTime = parseInt(timeInputString, 10);
-                if (timeInputString.length <= 10) { 
-                    parsedDate = new Date(numTime * 1000);
-                } else { 
-                    parsedDate = new Date(numTime);
-                }
-            } else {
-                parsedDate = new Date(timeInputString);
-            }
-
+            parsedDate = new Date(timeInputString);
+            
             if (isNaN(parsedDate.getTime())) {
-                return message.reply(`Invalid time format: "${timeInputString}". Please use a format like "YYYY-MM-DD HH:MM:SS", "MM/DD/YYYY HH:MM", or a Unix timestamp (seconds or milliseconds).`);
+                return message.reply(`Invalid time format: "${timeInputString}". Please use a clear format like \`"YYYY-MM-DD HH:MM"\`.`);
             }
             
-            if (parsedDate.getTime() > new Date().getTime() + 60000) { 
-                 return message.reply(`Future kill times are not allowed. The time provided (${parsedDate.toLocaleString()}) is in the future.`);
-            }
             killTimestamp = parsedDate.getTime();
         }
 
         updateBossAsKilled(guildId, bossKey, killTimestamp, message.channel, null);
-        saveBossData();
     } else if (commandName === 'status') {
         if (guildBosses.size === 0) {
             return message.reply('No bosses are being tracked on this server.');
@@ -319,7 +318,6 @@ client.on('messageCreate', async message => {
         if (guildBosses.has(bossKey)) {
             clearBossTimers(guildId, bossKey);
             guildBosses.delete(bossKey);
-            client.bossData.set(guildId, guildBosses); 
             await message.reply(`Boss "${bossNameArg}" removed.`);
             saveBossData();
         } else {
@@ -421,14 +419,13 @@ function updateBossAsKilled(guildId, bossKey, killTimestamp, replyChannel, inter
     
     clearBossTimers(guildId, bossKey); 
     scheduleBossNotifications(guildId, bossKey);
-    saveBossData(); 
+    saveBossData();
 }
 
 
 client.on('interactionCreate', async interaction => {
     if (!interaction.isButton()) return;
 
-    // Help button interactions
     if (interaction.customId.startsWith('help_')) {
         const helpCommand = interaction.customId.split('_')[1];
         let helpText = 'Command Information:\n';
@@ -437,36 +434,27 @@ client.on('interactionCreate', async interaction => {
         switch (helpCommand) {
             case 'addboss':
                 helpText += `**${prefix}addboss "<name>" "<location>" <min_hr> [max_hr] [channel_id]**\n`;
-                helpText += 'Adds a new boss to track.\n';
-                helpText += '- `<name>`: Boss name (in quotes if it has spaces).\n';
-                helpText += '- `<location>`: Boss location (in quotes if it has spaces).\n';
-                helpText += '- `<min_hr>`: Minimum respawn time in hours (e.g., `4`).\n';
-                helpText += '- `[max_hr]`: Optional. Maximum respawn time in hours if it\'s a window (e.g., `6`). If omitted, respawn is considered fixed.\n';
-                helpText += '- `[channel_id]`: Optional. Channel ID for notifications. If omitted, the current channel is used.\n';
-                helpText += 'Example: `!addboss "Queen Ant" "Ant Nest" 22 26`';
+                helpText += 'Adds a new boss to track.';
                 break;
             case 'killed':
-                helpText += `**${prefix}killed "<name>" [time]**\n`;
-                helpText += 'Marks a boss as killed.\n';
-                helpText += '- `<name>`: Boss name (in quotes if it has spaces).\n';
-                helpText += '- `[time]`: Optional. Time of kill. If omitted, current time is used. Formats: "YYYY-MM-DD HH:MM", "MM/DD/YYYY HH:MM", Unix timestamp (seconds or ms).\n';
-                helpText += 'Example: `!killed "Orfen" "2024-07-15 22:10"` or `!killed "Baium"`';
+                helpText += `**${prefix}killed "<name>" ["time"]**\n`;
+                helpText += 'Marks a boss as killed. If no time is given, uses the current time.';
                 break;
             case 'status':
                 helpText += `**${prefix}status [name]**\n`;
-                helpText += 'Shows the status of all tracked bosses or a specific boss.\n';
-                helpText += '- `[name]`: Optional. Boss name. If omitted, shows status for all bosses.';
+                helpText += 'Shows the status of all tracked bosses or a specific boss.';
                 break;
             case 'removeboss':
                 helpText += `**${prefix}removeboss "<name>"**\n`;
-                helpText += 'Removes a boss from the tracking list.\n';
-                helpText += '- `<name>`: Boss name (in quotes if it has spaces).';
+                helpText += 'Removes a boss from the tracking list.';
                 break;
             case 'setchannel':
                 helpText += `**${prefix}setchannel "<name>" <channel_id>**\n`;
-                helpText += 'Sets or changes the notification channel for a specific boss.\n';
-                helpText += '- `<name>`: Boss name (in quotes if it has spaces).\n';
-                helpText += '- `<channel_id>`: ID of the text channel for notifications.';
+                helpText += 'Sets or changes the notification channel for a specific boss.';
+                break;
+            case 'restart':
+                helpText += `**${prefix}restart**\n`;
+                helpText += 'Initiates a server restart sequence, triggering spawn notifications for all bosses. **(Admin only)**';
                 break;
             case 'ping':
                 helpText += `**${prefix}ping**\n`;
@@ -479,12 +467,38 @@ client.on('interactionCreate', async interaction => {
         return;
     }
 
+    if (interaction.customId === 'server_restart_confirm') {
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+            return interaction.reply({ content: 'You must be an administrator to confirm this action.', ephemeral: true });
+        }
+        
+        await interaction.update({ content: 'Acknowledged! Triggering spawn notifications for all bosses...', components: [] });
+        
+        const guildBosses = client.bossData.get(interaction.guildId);
+        if (guildBosses && guildBosses.size > 0) {
+            guildBosses.forEach((boss, bossKey) => {
+                console.log(`Server restart: Triggering spawn for ${boss.name}`);
+                // Clear any existing timers before forcing a new spawn notification
+                clearBossTimers(interaction.guildId, bossKey);
+                // Trigger the spawn notification immediately
+                triggerSpawnNotification(interaction.guildId, bossKey);
+            });
+        } else {
+             await interaction.followUp({ content: 'No bosses found to notify about.', ephemeral: true });
+        }
+        return;
+    }
 
-    // Boss action button interactions
+    if (interaction.customId === 'server_restart_cancel') {
+        await interaction.update({ content: 'Server restart sequence cancelled.', components: [] });
+        return;
+    }
+
+
     const [action, bossKeyFromId, guildIdFromId] = interaction.customId.split('_'); 
     
     if (guildIdFromId !== interaction.guildId) {
-        console.warn(`Mismatch guildId in customId: ${guildIdFromId} vs interaction.guildId: ${interaction.guildId}`);
+        console.warn(`Mismatched guildId in customId: ${guildIdFromId} vs interaction.guildId: ${interaction.guildId}`);
         return interaction.reply({ content: 'Server identification error.', ephemeral: true });
     }
 
@@ -524,7 +538,6 @@ client.on('interactionCreate', async interaction => {
         } else { 
             boss.nextSpawnEstimateMax = now + (boss.minRespawnHours + 1) * 60 * 60 * 1000;
         }
-        boss.isWindow = true; 
 
         await interaction.reply({ content: `🤷 Boss **${boss.name}** (${boss.location}) was **missed**. Next *possible* appearance time (window): ${formatNextSpawn(boss)}. **This is not an exact time!**`, ephemeral: false });
         clearBossTimers(interaction.guildId, bossKeyFromId); 
@@ -547,7 +560,6 @@ client.on('interactionCreate', async interaction => {
         } else { 
             boss.nextSpawnEstimateMax = boss.nextSpawnEstimateMin + 1 * 60 * 60 * 1000; 
         }
-        boss.isWindow = true; 
 
         await interaction.reply({ content: `🚫 Boss **${boss.name}** (${boss.location}) **did not appear**. Expectation shifted. Next *possible* time (window): ${formatNextSpawn(boss)}. **This is not an exact time!**`, ephemeral: false });
         clearBossTimers(interaction.guildId, bossKeyFromId); 
@@ -574,7 +586,66 @@ function formatNextSpawn(boss) {
     return spawnTime;
 }
 
-const PRE_SPAWN_NOTIFICATION_MINUTES = 15; 
+// NEW HELPER FUNCTION TO SEND SPAWN NOTIFICATION
+async function triggerSpawnNotification(guildId, bossKey) {
+    const guildBosses = client.bossData.get(guildId);
+    if (!guildBosses) return;
+    const boss = guildBosses.get(bossKey);
+    if (!boss) return;
+
+    try {
+        const notifyChannel = await client.channels.fetch(boss.notificationChannelId || boss.originalChannelId).catch(() => null);
+        if (notifyChannel) {
+            const spawnEmbed = new EmbedBuilder()
+                .setColor(0xFF4500) // OrangeRed
+                .setTitle(`🔥 ${boss.name} - SPAWNED!`)
+                .setDescription(`**Location:** ${boss.location}\nPlease report the status below.`)
+                .setTimestamp();
+
+            if (boss.isWindow) {
+                spawnEmbed.setTitle(`⏳ ${boss.name} - WINDOW OPEN!`);
+                if (boss.nextSpawnEstimateMax) {
+                    spawnEmbed.addFields({ name: 'Window Ends', value: `<t:${Math.floor(new Date(boss.nextSpawnEstimateMax).getTime() / 1000)}:R>` });
+                }
+            }
+
+            const row = new ActionRowBuilder()
+                .addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(`dead_${bossKey}_${guildId}`)
+                        .setLabel('Killed')
+                        .setStyle(ButtonStyle.Success)
+                        .setEmoji('✅'),
+                    new ButtonBuilder()
+                        .setCustomId(`miss_${bossKey}_${guildId}`)
+                        .setLabel('Missed')
+                        .setStyle(ButtonStyle.Secondary)
+                        .setEmoji('🤷'),
+                    new ButtonBuilder()
+                        .setCustomId(`notappeared_${bossKey}_${guildId}`)
+                        .setLabel('Did Not Appear')
+                        .setStyle(ButtonStyle.Danger)
+                        .setEmoji('🚫'),
+                );
+
+            const sentMessage = await notifyChannel.send({
+                content: '@everyone', // Pinging everyone
+                embeds: [spawnEmbed],
+                components: [row]
+            });
+            
+            const bossRef = client.bossData.get(guildId)?.get(bossKey);
+            if (bossRef) { 
+                bossRef.messageIdToTrack = sentMessage.id;
+                scheduleAutoMissTimer(guildId, bossKey, sentMessage.id, notifyChannel.id);
+                saveBossData(); 
+            }
+        } else {
+             console.warn(`Spawn: Could not find channel for boss ${boss.name} (${boss.notificationChannelId || boss.originalChannelId})`);
+        }
+    } catch (e) { console.error("Error sending spawn notification:", e); }
+}
+
 
 function scheduleBossNotifications(guildId, bossKey) {
     const guildBosses = client.bossData.get(guildId);
@@ -599,13 +670,21 @@ function scheduleBossNotifications(guildId, bossKey) {
 
                 const notifyChannel = await client.channels.fetch(currentBossData.notificationChannelId || currentBossData.originalChannelId).catch(() => null);
                 if (notifyChannel) {
-                    let messageContent = `🔔 **ATTENTION!** Boss **${currentBossData.name}** (${currentBossData.location}) is spawning soon!`;
+                    const preSpawnEmbed = new EmbedBuilder()
+                        .setColor(0xFFFF00) // Yellow
+                        .setTitle(`🔔 ${currentBossData.name} - Spawning Soon!`)
+                        .setDescription(`**Location:** ${currentBossData.location}`)
+                        .addFields(
+                            { name: 'Expected Time', value: `${formatNextSpawn(currentBossData)}` }
+                        )
+                        .setTimestamp();
+                    
                     if (currentBossData.isWindow) {
-                         messageContent += `\nExpected window start: ${formatNextSpawn(currentBossData)}. **This is not an exact time!**`;
-                    } else {
-                         messageContent += `\nExpected time: ${formatNextSpawn(currentBossData)}.`;
+                        preSpawnEmbed.setFooter({ text: 'This is the start of the respawn window.' });
                     }
-                    await notifyChannel.send(messageContent);
+                    
+                    await notifyChannel.send({ embeds: [preSpawnEmbed] });
+
                 } else {
                     console.warn(`Pre-spawn: Could not find channel for boss ${currentBossData.name} (${currentBossData.notificationChannelId || currentBossData.originalChannelId})`);
                 }
@@ -623,53 +702,16 @@ function scheduleBossNotifications(guildId, bossKey) {
         const timerKey = `${guildId}_${bossKey}_spawn`;
         
         const timer = setTimeout(async () => {
-            try {
-                const currentBossData = client.bossData.get(guildId)?.get(bossKey); 
-                if (!currentBossData || currentBossData.spawnNotificationJob !== timerKey) return; 
+            const currentBossData = client.bossData.get(guildId)?.get(bossKey); 
+            if (!currentBossData || currentBossData.spawnNotificationJob !== timerKey) return; 
 
-                const notifyChannel = await client.channels.fetch(currentBossData.notificationChannelId || currentBossData.originalChannelId).catch(() => null);
-                if (notifyChannel) {
-                    const row = new ActionRowBuilder()
-                        .addComponents(
-                            new ButtonBuilder()
-                                .setCustomId(`dead_${bossKey}_${guildId}`)
-                                .setLabel('✅ Killed (Dead)')
-                                .setStyle(ButtonStyle.Success),
-                            new ButtonBuilder()
-                                .setCustomId(`miss_${bossKey}_${guildId}`)
-                                .setLabel('🤷 Missed')
-                                .setStyle(ButtonStyle.Secondary),
-                            new ButtonBuilder()
-                                .setCustomId(`notappeared_${bossKey}_${guildId}`)
-                                .setLabel('🚫 Did Not Appear')
-                                .setStyle(ButtonStyle.Danger),
-                        );
-                    
-                    let spawnMessageContent = `🔥 Boss **${currentBossData.name}** (${currentBossData.location}) should be spawning **NOW**!`;
-                     if (currentBossData.isWindow) {
-                        spawnMessageContent = `⏳ The window for boss **${currentBossData.name}** (${currentBossData.location}) has started!`;
-                        if(currentBossData.nextSpawnEstimateMax) {
-                            spawnMessageContent += ` Window until <t:${Math.floor(new Date(currentBossData.nextSpawnEstimateMax).getTime() / 1000)}:R>.`;
-                        }
-                    }
-
-                    const sentMessage = await notifyChannel.send({
-                        content: spawnMessageContent,
-                        components: [row]
-                    });
-                    
-                    const bossRef = client.bossData.get(guildId)?.get(bossKey);
-                    if (bossRef) { 
-                        bossRef.messageIdToTrack = sentMessage.id;
-                        scheduleAutoMissTimer(guildId, bossKey, sentMessage.id, notifyChannel.id);
-                    }
-                } else {
-                     console.warn(`Spawn: Could not find channel for boss ${currentBossData.name} (${currentBossData.notificationChannelId || currentBossData.originalChannelId})`);
-                }
-            } catch (e) { console.error("Error sending spawn notification:", e); }
+            await triggerSpawnNotification(guildId, bossKey);
+            
             client.activeTimers.delete(timerKey);
             const bossRef = client.bossData.get(guildId)?.get(bossKey);
-            if (bossRef) bossRef.spawnNotificationJob = null;
+            if (bossRef) {
+                 bossRef.spawnNotificationJob = null;
+            }
         }, delay);
         client.activeTimers.set(timerKey, timer);
         boss.spawnNotificationJob = timerKey; 
@@ -729,7 +771,17 @@ function scheduleAutoMissTimer(guildId, bossKey, originalMessageId, channelIdFor
             try {
                 const channelForMessage = await client.channels.fetch(channelIdForAutoMissMessage).catch(() => null);
                  if (channelForMessage) {
-                    await channelForMessage.send(`⌛ Boss **${currentBossData.name}** (${currentBossData.location}) was automatically marked as **missed** due to no action taken. Next *possible* time: ${formatNextSpawn(currentBossData)}`);
+                    const autoMissEmbed = new EmbedBuilder()
+                        .setColor(0x778899) // LightSlateGray
+                        .setTitle(`⌛ ${currentBossData.name} - Automatically Missed`)
+                        .setDescription(`No status was reported for **${currentBossData.name}** (${currentBossData.location}). It has been marked as **missed** automatically.`)
+                        .addFields(
+                            { name: 'Next Possible Time', value: formatNextSpawn(currentBossData) }
+                        )
+                        .setFooter({ text: 'This is not an exact time!' })
+                        .setTimestamp();
+        
+                    await channelForMessage.send({ embeds: [autoMissEmbed] });
                 } else {
                     console.warn(`AutoMiss: Could not find channel ${channelIdForAutoMissMessage} to send auto-miss message for boss ${currentBossData.name}.`);
                 }
@@ -753,6 +805,7 @@ function scheduleAutoMissTimer(guildId, bossKey, originalMessageId, channelIdFor
 
     client.activeTimers.set(timerKey, timer);
     bossDataRef.autoMissJob = timerKey; 
+    saveBossData(); 
 }
 
 
