@@ -34,7 +34,7 @@ client.bossData = new Collection();
 
 
 const prefix = '!';
-const DATA_FILE_PATH = path.join(process.env.RENDER_DISK_MOUNT_PATH || __dirname, 'boss_data.json');
+const DATA_FILE_PATH = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || __dirname, 'boss_data.json');
 
 // Timers for notifications
 // { guildId_bossKey_type: timeoutObject }
@@ -78,16 +78,16 @@ function saveBossData() {
 
 function loadBossData() {
     try {
+        // Проверяем, существует ли основной файл данных в постоянном хранилище
         if (fs.existsSync(DATA_FILE_PATH)) {
             const rawData = fs.readFileSync(DATA_FILE_PATH);
             const loadedData = JSON.parse(rawData);
-            
-            client.bossData.clear(); // Clear any existing in-memory data before loading
+
+            client.bossData.clear(); 
 
             for (const guildId in loadedData) {
                 const guildBossesCollection = new Collection();
                 for (const bossKey in loadedData[guildId]) {
-                    // Ensure runtime timer job properties are null initially after loading
                     const bossObject = loadedData[guildId][bossKey];
                     bossObject.notificationJob = null;
                     bossObject.spawnNotificationJob = null;
@@ -96,13 +96,23 @@ function loadBossData() {
                 }
                 client.bossData.set(guildId, guildBossesCollection);
             }
-            console.log('Boss data loaded successfully.');
+            console.log('Boss data loaded successfully from persistent storage.');
         } else {
-            console.log('No existing boss data file found. Starting fresh.');
+            // Если основной файл не найден, ищем файл для импорта
+            console.log('Persistent boss_data.json not found. Checking for import file...');
+            const importFilePath = path.join(__dirname, 'boss_data_import.json');
+            if (fs.existsSync(importFilePath)) {
+                // Копируем данные из файла для импорта в постоянное хранилище
+                fs.copyFileSync(importFilePath, DATA_FILE_PATH);
+                console.log('Successfully copied data from boss_data_import.json to persistent storage.');
+                // После копирования, загружаем данные как обычно
+                loadBossData(); // Рекурсивный вызов, чтобы теперь прочитать уже скопированный файл
+            } else {
+                console.log('No import file found. Starting fresh.');
+            }
         }
     } catch (error) {
         console.error('Failed to load boss data:', error);
-        // If loading fails, start with an empty collection to prevent crashes
         client.bossData = new Collection();
     }
 }
