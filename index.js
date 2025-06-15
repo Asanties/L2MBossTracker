@@ -622,7 +622,10 @@ client.on('interactionCreate', async interaction => {
     }
 
 
-    const [action, bossKeyFromId, guildIdFromId] = interaction.customId.split('_'); 
+    const parts = interaction.customId.split('_');
+    const action = parts.shift(); // First part is the action
+    const guildIdFromId = parts.pop(); // Last part is the guildId
+    const bossKeyFromId = parts.join('_'); // Everything in the middle is the bossKey
     
     if (guildIdFromId !== interaction.guildId) {
         console.warn(`Mismatched guildId in customId: ${guildIdFromId} vs interaction.guildId: ${interaction.guildId}`);
