@@ -38,7 +38,7 @@ client.activeTimers = new Map();
 
 const AUTO_MISS_TIMEOUT_MINUTES = 20;
 const PRE_SPAWN_NOTIFICATION_MINUTES = 10; 
-const UNCONFIRMED_SPAWN_DELAY_MINUTES = 10; // New: 10 minute buffer for unconfirmed spawns
+const UNCONFIRMED_SPAWN_DELAY_MINUTES = 5; // New: 10 minute buffer for unconfirmed spawns
 
 
 client.on('ready', () => {
